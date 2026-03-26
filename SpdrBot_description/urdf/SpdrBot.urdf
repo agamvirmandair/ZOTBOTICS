@@ -1,0 +1,211 @@
+<?xml version="1.0"?>
+<robot name="spdrbot">
+
+  <!-- ================= BASE ================= -->
+  <link name="base">
+    <inertial>
+      <mass value="5"/>
+      <inertia ixx="0.2" iyy="0.2" izz="0.2" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <box size="0.4 0.3 0.1"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.4 0.3 0.1"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ================= LEG FUNCTION (REUSED STRUCTURE) ================= -->
+
+  <!-- Helper: one segment -->
+  <!-- We'll manually define all 4 legs -->
+
+  <!-- ================= LEG 1 ================= -->
+  <link name="leg1_upper">
+    <inertial>
+      <mass value="0.7"/>
+      <inertia ixx="0.02" iyy="0.02" izz="0.02" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+    <visual><geometry><box size="0.25 0.05 0.05"/></geometry></visual>
+    <collision><geometry><box size="0.25 0.05 0.05"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 77" type="revolute">
+    <parent link="base"/>
+    <child link="leg1_upper"/>
+    <origin xyz="0.2 0.15 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg1_mid">
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.01" iyy="0.01" izz="0.01"/>
+    </inertial>
+    <visual><geometry><box size="0.2 0.04 0.04"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.04 0.04"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 90" type="revolute">
+    <parent link="leg1_upper"/>
+    <child link="leg1_mid"/>
+    <origin xyz="0.25 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg1_lower">
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.005" iyy="0.005" izz="0.005"/>
+    </inertial>
+    <visual><geometry><box size="0.2 0.03 0.03"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.03 0.03"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 102" type="revolute">
+    <parent link="leg1_mid"/>
+    <child link="leg1_lower"/>
+    <origin xyz="0.2 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <!-- ================= LEG 2 ================= -->
+  <link name="leg2_upper">
+    <inertial><mass value="0.7"/><inertia ixx="0.02" iyy="0.02" izz="0.02"/></inertial>
+    <visual><geometry><box size="0.25 0.05 0.05"/></geometry></visual>
+    <collision><geometry><box size="0.25 0.05 0.05"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 78" type="revolute">
+    <parent link="base"/>
+    <child link="leg2_upper"/>
+    <origin xyz="0.2 -0.15 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg2_mid">
+    <inertial><mass value="0.5"/><inertia ixx="0.01" iyy="0.01" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.2 0.04 0.04"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.04 0.04"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 91" type="revolute">
+    <parent link="leg2_upper"/>
+    <child link="leg2_mid"/>
+    <origin xyz="0.25 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg2_lower">
+    <inertial><mass value="0.3"/><inertia ixx="0.005" iyy="0.005" izz="0.005"/></inertial>
+    <visual><geometry><box size="0.2 0.03 0.03"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.03 0.03"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 103" type="revolute">
+    <parent link="leg2_mid"/>
+    <child link="leg2_lower"/>
+    <origin xyz="0.2 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <!-- ================= LEG 3 ================= -->
+  <link name="leg3_upper">
+    <inertial><mass value="0.7"/><inertia ixx="0.02" iyy="0.02" izz="0.02"/></inertial>
+    <visual><geometry><box size="0.25 0.05 0.05"/></geometry></visual>
+    <collision><geometry><box size="0.25 0.05 0.05"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 79" type="revolute">
+    <parent link="base"/>
+    <child link="leg3_upper"/>
+    <origin xyz="-0.2 0.15 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg3_mid">
+    <inertial><mass value="0.5"/><inertia ixx="0.01" iyy="0.01" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.2 0.04 0.04"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.04 0.04"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 92" type="revolute">
+    <parent link="leg3_upper"/>
+    <child link="leg3_mid"/>
+    <origin xyz="0.25 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg3_lower">
+    <inertial><mass value="0.3"/><inertia ixx="0.005" iyy="0.005" izz="0.005"/></inertial>
+    <visual><geometry><box size="0.2 0.03 0.03"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.03 0.03"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 104" type="revolute">
+    <parent link="leg3_mid"/>
+    <child link="leg3_lower"/>
+    <origin xyz="0.2 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <!-- ================= LEG 4 ================= -->
+  <link name="leg4_upper">
+    <inertial><mass value="0.7"/><inertia ixx="0.02" iyy="0.02" izz="0.02"/></inertial>
+    <visual><geometry><box size="0.25 0.05 0.05"/></geometry></visual>
+    <collision><geometry><box size="0.25 0.05 0.05"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 80" type="revolute">
+    <parent link="base"/>
+    <child link="leg4_upper"/>
+    <origin xyz="-0.2 -0.15 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg4_mid">
+    <inertial><mass value="0.5"/><inertia ixx="0.01" iyy="0.01" izz="0.01"/></inertial>
+    <visual><geometry><box size="0.2 0.04 0.04"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.04 0.04"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 93" type="revolute">
+    <parent link="leg4_upper"/>
+    <child link="leg4_mid"/>
+    <origin xyz="0.25 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+  <link name="leg4_lower">
+    <inertial><mass value="0.3"/><inertia ixx="0.005" iyy="0.005" izz="0.005"/></inertial>
+    <visual><geometry><box size="0.2 0.03 0.03"/></geometry></visual>
+    <collision><geometry><box size="0.2 0.03 0.03"/></geometry></collision>
+  </link>
+
+  <joint name="Revolute 105" type="revolute">
+    <parent link="leg4_mid"/>
+    <child link="leg4_lower"/>
+    <origin xyz="0.2 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="20" velocity="5"/>
+  </joint>
+
+</robot>

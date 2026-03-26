@@ -1,0 +1,55 @@
+SpdrBot_controller:
+  # Publish all joint states -----------------------------------
+  joint_state_controller:
+    type: joint_state_controller/JointStateController
+    publish_rate: 50
+
+  # Position Controllers --------------------------------------
+  Revolute 77_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 77
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 78_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 78
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 79_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 79
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 80_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 80
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 90_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 90
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 91_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 91
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 92_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 92
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 93_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 93
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 102_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 102
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 103_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 103
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 104_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 104
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Revolute 105_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Revolute 105
+    pid: {p: 100.0, i: 0.01, d: 10.0}
