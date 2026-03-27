@@ -188,6 +188,12 @@ APPROACH_WEIGHT        = 12.0
 # Full strength when the forward arc is empty; fades to 0 as an obstacle enters it.
 CLEAR_PATH_WEIGHT      = 4.0
 
+# Re-alignment penalties — discourage sustained sideways drift and spinning once
+# obstacles are cleared.  Both terms are gated by (1 − max_closeness) so the
+# robot can turn/evade freely near hazards but must straighten up in open space.
+LATERAL_DRIFT_WEIGHT   = 1.2   # penalise |vy| when path is clear
+YAW_CORRECTION_WEIGHT  = 0.8   # penalise |yaw_rate| when path is clear
+
 # Observation normalisation constants (not reward weights — kept for obs building).
 YAW_RATE_CLIP      = 5.0   # rad/s ceiling for obs normalisation
 YAW_RATE_DEADBAND  = 0.40  # rad/s deadband (obs only)
@@ -258,6 +264,8 @@ class SpiderEnv(gym.Env):
     FORWARD_DANGER_WEIGHT  = FORWARD_DANGER_WEIGHT
     APPROACH_WEIGHT        = APPROACH_WEIGHT
     CLEAR_PATH_WEIGHT      = CLEAR_PATH_WEIGHT
+    LATERAL_DRIFT_WEIGHT   = LATERAL_DRIFT_WEIGHT
+    YAW_CORRECTION_WEIGHT  = YAW_CORRECTION_WEIGHT
     YAW_RATE_CLIP          = YAW_RATE_CLIP
     YAW_RATE_DEADBAND      = YAW_RATE_DEADBAND
     WALL_SAFE_RADIUS       = WALL_SAFE_RADIUS
@@ -563,7 +571,7 @@ class SpiderEnv(gym.Env):
         # ── IMU (needed for heading vector and obs) ───────────────────────────
         _, orn = p.getBasePositionAndOrientation(self.robot_id)
         _, _, yaw = p.getEulerFromQuaternion(orn)
-        lin_vel, ang_vel = p.getBaseVelocity(self.robot_id)
+        lin_vel, _ = p.getBaseVelocity(self.robot_id)
         vel_2d   = np.array([float(lin_vel[0]), float(lin_vel[1])], dtype=np.float64)
         robot_forward = np.array([math.cos(yaw), math.sin(yaw)])
 
@@ -635,6 +643,22 @@ class SpiderEnv(gym.Env):
         vx = float(lin_vel[0])
         clear_path_bonus = max(0.0, vx) * (1.0 - max_forward_threat) * self.CLEAR_PATH_WEIGHT
 
+        # Re-alignment penalties — gate both by clearance² so the penalty is near-zero
+        # whenever any obstacle is in the safe zone, and only reaches full strength in
+        # genuinely open space.  Squaring makes it fade 4× faster than a linear gate:
+        #   closeness=0.0 → clearance²=1.00  (full penalty — no hazards nearby)
+        #   closeness=0.3 → clearance²=0.49  (half strength — obstacle on outer edge)
+        #   closeness=0.5 → clearance²=0.25  (quarter strength — halfway into zone)
+        #   closeness=0.8 → clearance²=0.04  (nearly zero  — actively evading)
+        clearance = (1.0 - max_closeness) ** 2
+        vy = float(lin_vel[1])
+        lateral_drift_penalty  = abs(vy)              * clearance * self.LATERAL_DRIFT_WEIGHT
+        # Penalise heading error from +X (not yaw rate), so the robot can freely
+        # rotate back toward forward without being discouraged by the penalty.
+        # cos(yaw)=1 when facing +X → error=0; cos(yaw)=-1 when facing -X → error=2.
+        yaw_error              = 1.0 - math.cos(yaw)
+        yaw_correction_penalty = yaw_error             * clearance * self.YAW_CORRECTION_WEIGHT
+
         # Suppress all positive terms as the robot closes in on a hazard.
         suppression     = 1.0 - max_closeness
         forward_reward  *= suppression
@@ -653,19 +677,23 @@ class SpiderEnv(gym.Env):
             - approach_penalty
             + avoidance_bonus
             + fall_penalty            # already negative
+            - lateral_drift_penalty
+            - yaw_correction_penalty
         )
 
         components = {
-            "forward":    round(forward_reward,           4),
-            "progress":   round(progress_reward,          4),
-            "clear_path": round(clear_path_bonus,         4),
-            "proximity":  round(-proximity_penalty,       4),
-            "fwd_danger": round(-forward_danger_penalty,  4),
-            "approach":   round(-approach_penalty,        4),
-            "avoidance":  round(avoidance_bonus,          4),
-            "collision":  round(collision_penalty,        4),
-            "fall":       round(fall_penalty,             4),
-            "total":      round(total,                    4),
+            "forward":       round(forward_reward,            4),
+            "progress":      round(progress_reward,           4),
+            "clear_path":    round(clear_path_bonus,          4),
+            "proximity":     round(-proximity_penalty,        4),
+            "fwd_danger":    round(-forward_danger_penalty,   4),
+            "approach":      round(-approach_penalty,         4),
+            "avoidance":     round(avoidance_bonus,           4),
+            "lat_drift":     round(-lateral_drift_penalty,    4),
+            "yaw_correct":   round(-yaw_correction_penalty,   4),
+            "collision":     round(collision_penalty,         4),
+            "fall":          round(fall_penalty,              4),
+            "total":         round(total,                     4),
         }
         return float(total), components
 
