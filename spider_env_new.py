@@ -160,7 +160,7 @@ GAIT_SHOULDER_DIRS = np.array([-1.0, +1.0, +1.0, -1.0])
 # Without substeps a 500-step episode was only ~2 seconds — far too short for
 # the robot to move any meaningful distance before the episode ended.
 PHYSICS_SUBSTEPS = 8
-MAX_STEPS        = 1000
+MAX_STEPS        = 2000
 
 # ── Stability threshold ───────────────────────────────────────────────────────
 FALL_ANGLE_RAD = 1.05    # ~60° in pitch or roll — robot considered fallen
@@ -169,26 +169,49 @@ FALL_ANGLE_RAD = 1.05    # ~60° in pitch or roll — robot considered fallen
 # Target scale: most steps should produce a total reward in roughly [-3, +3].
 FORWARD_WEIGHT       = 6.0    # reduced — collision avoidance now takes priority
 VELOCITY_WEIGHT      = 1.5    # reduced — fades to zero automatically near obstacles
-HEADING_WEIGHT       = 2.0    # reward for facing +X: cos(yaw) × weight
+HEADING_WEIGHT       = 0.8    # reduced — was dominating avoidance signal at 2.0
 SURVIVAL_BONUS       = 0.01   # tiny — must not compete with forward progress
-SAFE_RADIUS          = 1.2    # m — wider warning zone gives agent more time to react
-OBSTACLE_WEIGHT      = 2.0    # strong proximity gradient — cost grows quickly as robot closes in
-COLLISION_PENALTY    = -15.0  # hard terminal penalty; 2.5× the goal bonus to make contact clearly fatal
+SAFE_RADIUS          = 1.0    # m — tighter zone; -5000 terminal penalty carries the main avoidance signal
+OBSTACLE_WEIGHT      = 6.0    # halved — less oppressive per-step drag so forward nav isn't unfairly taxed
+# COLLISION_PENALTY must dominate the maximum possible accumulated episode reward so
+# that any collision always produces a negative total, no matter how well the robot
+# walked before it.  Budget analysis:
+#
+#   Max per-step positive contribution (heading=2 + forward+progress≈0.2 +
+#     velocity≈0.3 + avoidance≈2) ≈ 4.5/step × 1000 steps = 4500 theoretical max.
+#   Realistic good-walk ceiling: heading(2000) + forward+progress(80) +
+#     velocity(75) + survival(10) = ≈ 2165.
+#
+#   To guarantee a negative episode even in the absolute best walk before contact:
+#     COLLISION_PENALTY < −4500  (covers theoretical max)
+#     COLLISION_PENALTY = −5000  (comfortable margin)
+#
+# The robot still benefits from walking far before colliding — more positive
+# accumulated reward means the final total is less negative, so the agent learns
+# to prefer late collisions over early ones, which drives good gait development.
+# But the episode is always negative, making collision strictly worse than
+# reaching the goal (~+1400) or even a clean timeout (~+1400 without goal bonus).
+COLLISION_PENALTY    = -5000.0
 FALL_PENALTY         = -5.0   # terminal penalty for tipping over
 ENERGY_WEIGHT        = 0.001  # scales sum of |joint torques|; kept very small
 SMOOTH_WEIGHT        = 0.02   # smoothness nudge on action changes
-STAGNATION_PENALTY   = 0.2    # gentle nudge to keep moving; low to avoid jitter
+STAGNATION_PENALTY   = 0.01   # very small — robot must be able to stop/slow near obstacles
 STAGNATION_THRESHOLD = 0.0002 # min metres per step to avoid stagnation penalty
 
 # Lateral evasion reward.
-# Active only when an obstacle is within SAFE_RADIUS.  Rewards sideways
-# movement (|vy|) scaled by how close the nearest obstacle is:
-#   closeness = (SAFE_RADIUS - dist) / SAFE_RADIUS   → 0 at edge, 1 at contact
-#   bonus = LATERAL_EVASION_WEIGHT × closeness × |vy|
-# Far from obstacles this is exactly zero — no incentive to swerve on open ground.
-# The forward velocity reward is simultaneously suppressed by (1 - closeness) so
-# the agent cannot gain by charging straight into an obstacle.
-LATERAL_EVASION_WEIGHT = 3.0
+# Active only when an obstacle/wall is within SAFE_RADIUS.  Rewards movement
+# *away* from each hazard using the true repulsion direction (robot − obstacle),
+# not just raw |vy|.  This guides the agent to move away from the threat rather
+# than just wiggling sideways randomly.
+#   repulsion_dir = normalised (robot_pos − hazard_pos)  in XY plane
+#   avoidance_component = dot(velocity, repulsion_dir)   (positive = moving away)
+#   bonus = LATERAL_EVASION_WEIGHT × closeness × max(0, avoidance_component)
+# Far from obstacles this is exactly zero — no swerving incentive on open ground.
+# Both forward_reward and velocity_reward are suppressed by (1 − max_closeness) so
+# charging straight into a hazard is never profitable at any speed.
+LATERAL_EVASION_WEIGHT = 5.0
+FORWARD_DANGER_WEIGHT  = 2.0   # reduced — was double-penalising forward motion vs lateral; terminal penalty now carries the signal
+LATERAL_PENALTY_WEIGHT = 2.0   # penalty on |vy| when not in evasion mode — discourages wall-hugging exploit
 
 # ── IMU-based stability penalties ─────────────────────────────────────────────
 # These directly address the spinning-in-place failure mode.
@@ -196,9 +219,32 @@ LATERAL_EVASION_WEIGHT = 3.0
 # YAW_RATE_WEIGHT: penalty per rad/s of yaw (Z-axis) angular velocity.
 # TILT_WEIGHT: penalty on (roll² + pitch²) in radians (quadratic).
 # YAW_RATE_CLIP: normalisation ceiling for yaw_rate in the observation.
-YAW_RATE_WEIGHT = 1.0   # penalty per rad/s of yaw angular velocity
-TILT_WEIGHT     = 0.5   # penalty weight on roll² + pitch² (rad²)
-YAW_RATE_CLIP   = 5.0   # rad/s ceiling for obs normalisation
+YAW_RATE_WEIGHT    = 0.6    # reduced from 1.0 — paired with a deadband so natural gait
+                            # oscillation is free; only true spinning is penalised
+TILT_WEIGHT        = 0.5   # penalty weight on roll² + pitch² (rad²)
+YAW_RATE_CLIP      = 5.0   # rad/s ceiling for obs normalisation AND reward clipping
+YAW_RATE_DEADBAND  = 0.40  # rad/s — CPG gait naturally oscillates below this; no penalty
+                            # below this threshold so the reward is not taxed every stride
+
+# Separate safe-radius for arena walls (shorter than obstacle SAFE_RADIUS).
+# The robot spawns at X=0; the back wall is at X=-1 (1.0 m away).  With the old
+# SAFE_RADIUS=1.5 m the robot started every episode inside the wall's warning zone
+# and paid ~-3/step × ~150 steps = -450 from step 1.  Using WALL_SAFE_RADIUS=0.8 m
+# keeps the warning zone relevant for walls the robot is about to hit but removes
+# the unconditional tax on the starting position.
+WALL_SAFE_RADIUS   = 1.20  # m — proximity warning zone for arena walls.
+                            # 1.2 m keeps the back wall (surface ~0.95 m from spawn)
+                            # inside the zone with a small initial penalty (~0.4/step)
+                            # that fades quickly as the robot walks forward, while
+                            # giving meaningful advance warning for the side walls.
+
+# Potential-based progress shaping toward the goal.
+# Grounded in Ng et al. (1999): Φ(s) = GOAL_X − x, so the per-step shaping reward
+# equals (GOAL_X − x_prev) − (GOAL_X − x_curr) = dx (only when x < GOAL_X).
+# Equivalent to adding a second forward-weight that stops contributing once the
+# goal is reached, giving a strong dense signal for every centimetre of progress.
+GOAL_X           = 5.0     # m — target X coordinate (must match step() check)
+PROGRESS_WEIGHT  = 10.0    # shaping reward per metre closer to goal
 
 # ── Residual action scale and smoothing ───────────────────────────────────────
 # RESIDUAL_SCALE multiplies the agent's raw action before it is added to the
@@ -262,7 +308,13 @@ class SpiderEnv(gym.Env):
     YAW_RATE_WEIGHT        = YAW_RATE_WEIGHT
     TILT_WEIGHT            = TILT_WEIGHT
     YAW_RATE_CLIP          = YAW_RATE_CLIP
+    YAW_RATE_DEADBAND      = YAW_RATE_DEADBAND
     LATERAL_EVASION_WEIGHT = LATERAL_EVASION_WEIGHT
+    FORWARD_DANGER_WEIGHT  = FORWARD_DANGER_WEIGHT
+    LATERAL_PENALTY_WEIGHT = LATERAL_PENALTY_WEIGHT
+    WALL_SAFE_RADIUS       = WALL_SAFE_RADIUS
+    GOAL_X                 = GOAL_X
+    PROGRESS_WEIGHT        = PROGRESS_WEIGHT
 
     def __init__(self, render_mode: str = "human", urdf_path: str = URDF_PATH):
         super().__init__()
@@ -308,7 +360,7 @@ class SpiderEnv(gym.Env):
 
         self.robot_id      = None
         self.joint_ids     = []
-        self.wall_ids      = []   # arena boundary walls — penalise but don't terminate
+        self.wall_ids      = []   # arena boundary walls — proximity + collision penalties, terminate on contact
         self.obstacle_ids  = []   # red box obstacles — penalise and track proximity
         self.position      = [0.0, 0.0, 0.0]
         self._prev_x       = 0.0
@@ -317,6 +369,12 @@ class SpiderEnv(gym.Env):
         self.step_count         = 0    # counts steps within the current episode
         self._prev_action       = np.zeros(12, dtype=np.float32)  # for smoothness penalty
         self._smoothed_residual = np.zeros(12, dtype=np.float32)  # EMA state for action filter
+        # Running reward normalisation — persists across episodes so the estimate
+        # stabilises over time.  Reward is divided by the running std before being
+        # returned, taming large terminal spikes without changing reward signs.
+        self._rn_count = 0
+        self._rn_mean  = 0.0
+        self._rn_var   = 1.0
 
         self.reset()
 
@@ -593,15 +651,30 @@ class SpiderEnv(gym.Env):
         forward      : reward for +X displacement this step (position progress)
         velocity     : reward for current global forward speed
         heading      : reward for facing +X  (cos yaw × weight)
-        yaw_rate     : penalty for spinning  (|ω_z| × weight)
+        yaw_rate     : penalty for spinning  (clipped |ω_z| × weight)
         tilt         : penalty for roll/pitch tilt  ((roll² + pitch²) × weight)
         survival     : small bonus for each step still alive
-        proximity    : penalty for being close to a red obstacle
-        collision    : penalty for touching a red obstacle
-        fall         : penalty for tipping over
+        proximity    : penalty for being close to a hazard — capped per step
+        avoidance    : bonus for moving away from the nearest hazard
+        fall         : one-shot terminal penalty for tipping over
         energy       : penalty proportional to motor effort
         smooth       : penalty for abrupt action changes
         stagnation   : penalty for barely moving forward
+
+        Scale contract
+        --------------
+        Per-step reward is designed to stay in roughly [-3, +3] under normal
+        (obstacle-free) operation, and becomes more negative in proportion to
+        proximity so the gradient is unambiguous.  Key bounds:
+
+          • All positive terms (forward, velocity, heading, progress) are
+            multiplied by (1 − max_closeness) → all fall to 0 at contact.
+          • proximity per hazard capped at _PER_HAZARD_CAP = 4.0; total
+            capped at 16.0 (4 simultaneous full-strength hazards).
+          • yaw_rate clipped at (YAW_RATE_CLIP − YAW_RATE_DEADBAND) → max 2.76
+          • away_speed clipped to [0, 1] m/s per hazard
+          • velocity clipped to ±3 m/s before scaling
+          • collision_penalty is terminal-only (applied in step(), not here)
 
         Spinning fix rationale
         ----------------------
@@ -616,86 +689,183 @@ class SpiderEnv(gym.Env):
         # ── Position / velocity signals ───────────────────────────────────────
         dx = robot_pos[0] - self._prev_x
         forward_reward  = dx * self.FORWARD_WEIGHT
-        velocity_reward = robot_vel_x * self.VELOCITY_WEIGHT
+        # Clip vx so a physics glitch cannot produce an unbounded velocity reward.
+        vx_clipped      = float(np.clip(robot_vel_x, -3.0, 3.0))
+        velocity_reward = vx_clipped * self.VELOCITY_WEIGHT
+
+        # Potential-based progress shaping — rewards every metre the robot gets
+        # closer to the goal.  The shaping amount equals dx × PROGRESS_WEIGHT while
+        # the robot has not yet reached GOAL_X, then drops to zero.  This gives a
+        # dense, positive signal for every step of forward progress without changing
+        # the optimal policy (potential-based shaping is policy-invariant).
+        prev_dist_to_goal = max(0.0, self.GOAL_X - self._prev_x)
+        curr_dist_to_goal = max(0.0, self.GOAL_X - robot_pos[0])
+        progress_reward   = (prev_dist_to_goal - curr_dist_to_goal) * self.PROGRESS_WEIGHT
 
         # ── IMU + lateral velocity ────────────────────────────────────────────
         _, orn = p.getBasePositionAndOrientation(self.robot_id)
         roll, pitch, yaw = p.getEulerFromQuaternion(orn)
         lin_vel, ang_vel = p.getBaseVelocity(self.robot_id)
         yaw_rate = float(ang_vel[2])   # world-Z angular velocity ≈ yaw rate (rad/s)
-        vy       = float(lin_vel[1])   # global Y velocity — used for lateral evasion
+        vel_2d   = np.array([float(lin_vel[0]), float(lin_vel[1])], dtype=np.float64)
 
-        # Heading: cos(yaw)==1 facing +X, -1 facing -X.
+        # Heading: cos(yaw)==1 facing +X, -1 facing -X.  Range [-2, +2].
         heading_reward = math.cos(yaw) * self.HEADING_WEIGHT
 
-        # Yaw rate penalty: immediate cost for spinning regardless of heading.
-        # Makes every rad/s of unproductive rotation strictly expensive.
-        yaw_rate_penalty = self.YAW_RATE_WEIGHT * abs(yaw_rate)
+        # Yaw rate penalty: only charge for rotation *above* the deadband so natural
+        # CPG gait oscillation (typically < 0.4 rad/s) does not tax every stride.
+        # Clamped to (YAW_RATE_CLIP − YAW_RATE_DEADBAND) so the total is bounded.
+        yaw_rate_excess  = max(0.0, abs(yaw_rate) - self.YAW_RATE_DEADBAND)
+        yaw_rate_penalty = self.YAW_RATE_WEIGHT * min(yaw_rate_excess,
+                                                       self.YAW_RATE_CLIP - self.YAW_RATE_DEADBAND)
 
         # Tilt penalty: quadratic cost on roll and pitch.
-        # Near-zero when upright; grows with lean to keep the body level.
+        # Near-zero when upright; bounded below the fall threshold (~1.05 rad each
+        # axis → 0.5 × 2 × 1.05² ≈ 1.1 maximum before termination).
         tilt_penalty = self.TILT_WEIGHT * (float(roll) ** 2 + float(pitch) ** 2)
 
         # ── Other penalties ───────────────────────────────────────────────────
+        # Use abs(dx): the condition dx < THRESHOLD was incorrectly firing on
+        # large backward motion (e.g. dx = -0.5 m/step), calling fast reversal
+        # "stagnation" and double-penalising it on top of the negative forward_reward.
+        # Stagnation should only mean "nearly stationary", not "moving backward".
         stagnation_penalty = (
-            -self.STAGNATION_PENALTY if dx < self.STAGNATION_THRESHOLD else 0.0
+            -self.STAGNATION_PENALTY if abs(dx) < self.STAGNATION_THRESHOLD else 0.0
         )
 
         survival = self.SURVIVAL_BONUS
 
-        # ── Obstacle proximity, lateral evasion, and forward suppression ─────
-        # For each obstacle inside SAFE_RADIUS, compute a normalised closeness
-        # score in [0, 1] (0 = at the safe-radius boundary, 1 = touching).
-        # This single value drives three coupled effects:
+        # ── Obstacle/wall proximity, directional evasion, and forward suppression ─
+        # For each hazard inside SAFE_RADIUS, compute a normalised closeness score
+        # in [0, 1] and drive three coupled effects:
         #
-        #   1. proximity_penalty : grows linearly with closeness — strong
-        #      deterrent that activates well before contact.
+        #   1. proximity_penalty : exponential shape — gentle at the safe-zone
+        #      boundary, spikes sharply in the final approach so the agent feels
+        #      a growing cost when it is about to make contact.
+        #      Formula: (closeness + (exp(3c)-1)/(exp(3)-1)) * weight
+        #      The total across ALL hazards is hard-capped at 3.0 so that being
+        #      near multiple walls simultaneously cannot push one step far below -3.
         #
-        #   2. lateral_bonus : rewards sideways speed (|vy|) proportional to
-        #      closeness — incentive to swerve rather than brake.
+        #   2. avoidance_bonus : rewards velocity *along* the repulsion vector
+        #      (robot − hazard), not just raw |vy|.  away_speed is clipped to
+        #      1 m/s per hazard and the running total is capped at 2.0 so the
+        #      evasion signal never dominates forward progress.
         #
-        #   3. velocity_reward suppression : scales down the forward-velocity
-        #      reward by (1 - max_closeness) — charging into an obstacle can
-        #      never be profitable even at high speed.
-        proximity_penalty = 0.0
-        lateral_bonus     = 0.0
-        max_closeness     = 0.0   # track the nearest obstacle for suppression
+        #   3. Unified positive-reward suppression : ALL positive per-step terms
+        #      (forward, velocity, heading, progress) are multiplied by
+        #      (1 − max_closeness) so charging into any hazard at full speed
+        #      can never be profitable, regardless of which reward is largest.
+        _EXP3           = math.exp(3.0) - 1.0   # normalisation constant, computed once
+        _PER_HAZARD_CAP = 8.0                   # raised — stronger per-hazard gradient
+
+        # Robot's forward-facing unit vector in the XY plane.
+        robot_forward = np.array([math.cos(yaw), math.sin(yaw)])
+
+        proximity_total     = 0.0
+        avoidance_total     = 0.0
+        forward_danger_total = 0.0
+        max_closeness       = 0.0   # tracks nearest hazard for reward suppression
 
         for obs_id in self.obstacle_ids:
             obs_pos, _ = p.getBasePositionAndOrientation(obs_id)
-            dist = float(np.linalg.norm(
-                np.array(robot_pos[:2]) - np.array(obs_pos[:2])
-            ))
+            vec_away = np.array(robot_pos[:2]) - np.array(obs_pos[:2])
+            dist = float(np.linalg.norm(vec_away))
             if dist < self.SAFE_RADIUS:
                 closeness = (self.SAFE_RADIUS - dist) / self.SAFE_RADIUS  # [0, 1]
-                proximity_penalty += closeness * self.OBSTACLE_WEIGHT
-                lateral_bonus     += closeness * abs(vy) * self.LATERAL_EVASION_WEIGHT
-                max_closeness      = max(max_closeness, closeness)
+                exp_term  = (math.exp(3.0 * closeness) - 1.0) / _EXP3
+                # Per-hazard cap so the gradient remains meaningful right up to
+                # contact rather than saturating at a low closeness value.
+                proximity_total += min((closeness + exp_term) * self.OBSTACLE_WEIGHT,
+                                       _PER_HAZARD_CAP)
+                if dist > 1e-6:
+                    repulsion_dir = vec_away / dist
+                else:
+                    repulsion_dir = np.array([1.0, 0.0])
+                away_speed = float(np.clip(np.dot(vel_2d, repulsion_dir), 0.0, 1.0))
+                avoidance_total += closeness * away_speed * self.LATERAL_EVASION_WEIGHT
+                max_closeness    = max(max_closeness, closeness)
+                # Forward-cone danger: extra penalty when obstacle is directly ahead.
+                # to_obstacle = -repulsion_dir (points from robot toward obstacle).
+                # forward_alignment = 1 when dead ahead, 0 when 90° to side.
+                forward_alignment = max(0.0, float(np.dot(robot_forward, -repulsion_dir)))
+                forward_danger_total += closeness * forward_alignment * self.FORWARD_DANGER_WEIGHT
 
-        # Suppress forward velocity reward as obstacles get closer.
-        # At closeness=0 (edge of safe zone): full velocity reward.
-        # At closeness=1 (contact): velocity reward = 0.
-        velocity_reward *= (1.0 - max_closeness)
+        # Wall proximity — use getClosestPoints so the distance is to the wall
+        # *surface* rather than its centre (walls are long, off-centre objects).
+        # No approach-gating: penalty always fires regardless of velocity direction.
+        # Previous approach-gating caused side walls to be invisible when the robot
+        # drifted toward them slowly (vy < 0.05 m/s threshold never triggered).
+        for wall_id in self.wall_ids:
+            pts = p.getClosestPoints(self.robot_id, wall_id, self.WALL_SAFE_RADIUS)
+            if pts:
+                best = min(pts, key=lambda pt: pt[8])
+                dist = max(0.0, float(best[8]))
+                closeness = float(np.clip(
+                    (self.WALL_SAFE_RADIUS - dist) / self.WALL_SAFE_RADIUS, 0.0, 1.0))
+                exp_term  = (math.exp(3.0 * closeness) - 1.0) / _EXP3
+                proximity_total += min((closeness + exp_term) * self.OBSTACLE_WEIGHT,
+                                       _PER_HAZARD_CAP)
+                max_closeness = max(max_closeness, closeness)
+                normal_xy = np.array(best[7][:2], dtype=np.float64)
+                norm_len  = np.linalg.norm(normal_xy)
+                if norm_len > 1e-6:
+                    repulsion_dir = normal_xy / norm_len
+                    away_speed    = float(np.clip(np.dot(vel_2d, repulsion_dir), 0.0, 1.0))
+                    avoidance_total += closeness * away_speed * self.LATERAL_EVASION_WEIGHT
+                    # Forward-cone danger for walls: wall normal points away from wall,
+                    # so -normal points into the wall (the dangerous direction).
+                    forward_alignment = max(0.0, float(np.dot(robot_forward, -repulsion_dir)))
+                    forward_danger_total += closeness * forward_alignment * self.FORWARD_DANGER_WEIGHT
 
+        # Total cap: 4 simultaneous hazards at full strength.
+        proximity_penalty    = min(proximity_total,      32.0)
+        avoidance_bonus      = min(avoidance_total,       2.0)
+        forward_danger_penalty = min(forward_danger_total, 8.0)
+
+        # Lateral velocity penalty — discourages wall-hugging / sideways exploit.
+        # Waived during genuine evasion (max_closeness >= 0.1) so the robot can
+        # still dodge sideways when actually near a hazard.
+        vy = float(lin_vel[1])
+        lateral_penalty = (
+            self.LATERAL_PENALTY_WEIGHT * abs(vy) if max_closeness < 0.1 else 0.0
+        )
+
+        # ── Unified suppression — applied to ALL positive per-step terms ──────
+        # FIX: heading_reward was previously NOT suppressed near obstacles, leaving
+        # a constant +2.0/step pull toward obstacles that the proximity penalty
+        # (-3.0 max old, now up to -16) could not reliably overcome.  Now every
+        # positive term scales to zero as the robot closes in on any hazard, making
+        # every near-obstacle step strictly worse than an equivalent step in open
+        # space — the gradient is unambiguous at every distance.
+        suppression      = 1.0 - max_closeness
+        forward_reward  *= suppression
+        velocity_reward *= suppression
+        heading_reward  *= suppression   # was missing — the critical omission
+        progress_reward *= suppression   # don't reward progress toward a hazard
+
+        # Collision penalty is terminal-only — applied once in step() when contact
+        # is detected.  Removing it from the per-step loop prevents the old
+        # behaviour where touching N obstacles at once added N × COLLISION_PENALTY
+        # every step (e.g. -125 / step with 5 obstacles), which dominated the
+        # episode return and buried all other learning signal.
         collision_penalty = 0.0
-        for obs_id in self.obstacle_ids:
-            if p.getContactPoints(self.robot_id, obs_id):
-                collision_penalty += self.COLLISION_PENALTY
 
-        fall_penalty    = self.FALL_PENALTY if self._has_fallen() else 0.0
-        energy_penalty  = -self.ENERGY_WEIGHT * float(np.sum(np.abs(self.joint_torques)))
-        smooth_penalty  = -self.SMOOTH_WEIGHT * float(np.mean(np.abs(action - self._prev_action)))
+        fall_penalty   = self.FALL_PENALTY if self._has_fallen() else 0.0
+        energy_penalty = -self.ENERGY_WEIGHT * float(np.sum(np.abs(self.joint_torques)))
+        smooth_penalty = -self.SMOOTH_WEIGHT * float(np.mean(np.abs(action - self._prev_action)))
 
         total = (
             forward_reward
+            + progress_reward       # potential-based shaping toward goal
             + velocity_reward       # already suppressed near obstacles
             + heading_reward
             - yaw_rate_penalty
             - tilt_penalty
             + survival
             - proximity_penalty
-            + lateral_bonus         # reward for swerving when close
-            + collision_penalty     # already negative
+            - forward_danger_penalty  # extra cost when heading directly into a hazard
+            + avoidance_bonus        # reward for moving away from hazards
+            - lateral_penalty        # discourages wall-hugging when no hazard nearby
             + fall_penalty          # already negative
             + energy_penalty        # already negative
             + smooth_penalty        # already negative
@@ -704,13 +874,16 @@ class SpiderEnv(gym.Env):
 
         components = {
             "forward":    round(forward_reward,      4),
+            "progress":   round(progress_reward,     4),
             "velocity":   round(velocity_reward,     4),
             "heading":    round(heading_reward,       4),
             "yaw_rate":   round(-yaw_rate_penalty,   4),
             "tilt":       round(-tilt_penalty,        4),
             "survival":   round(survival,             4),
-            "proximity":  round(-proximity_penalty,   4),
-            "lateral":    round(lateral_bonus,        4),
+            "proximity":  round(-proximity_penalty,       4),
+            "fwd_danger": round(-forward_danger_penalty, 4),
+            "avoidance":  round(avoidance_bonus,         4),
+            "lateral":    round(-lateral_penalty,         4),
             "collision":  round(collision_penalty,    4),
             "fall":       round(fall_penalty,         4),
             "energy":     round(energy_penalty,       4),
@@ -753,14 +926,19 @@ class SpiderEnv(gym.Env):
             self._create_wall90 ([ 6.0,  0.0, 0.5], length=6),  # front wall (goal end)
         ]
 
-        # Red obstacles — these affect proximity/collision reward
+        # Red obstacles — these affect proximity/collision reward.
+        # Obstacles are kept out of a 0.8 m-wide center corridor (|Y| < 0.4) for
+        # the first 2.5 m (X < 2.5) so every episode has a passable opening at the
+        # start.  This reduces extreme difficulty variance while still requiring the
+        # agent to navigate around obstacles in the second half of the arena.
         self.obstacle_ids = []
         for _ in range(5):
-            self.obstacle_ids.append(self._create_obstacle([
-                random.uniform(1.0, 5.0),
-                random.uniform(-2.5, 2.5),
-                0.5,
-            ]))
+            while True:
+                ox = random.uniform(1.0, 5.0)
+                oy = random.uniform(-2.5, 2.5)
+                if ox >= 2.5 or abs(oy) >= 0.4:
+                    break
+            self.obstacle_ids.append(self._create_obstacle([ox, oy, 0.5]))
 
         pos, _ = p.getBasePositionAndOrientation(self.robot_id)
         self.position = list(pos)
@@ -835,33 +1013,61 @@ class SpiderEnv(gym.Env):
         terminated = False
         truncated  = False
 
-        collided = any(
+        collided_obstacle = any(
             p.getContactPoints(self.robot_id, obs_id)
             for obs_id in self.obstacle_ids
         )
+        collided_wall = any(
+            p.getContactPoints(self.robot_id, wall_id)
+            for wall_id in self.wall_ids
+        )
 
-        if new_pos[0] >= 5.0:
-            # Robot reached the goal — bonus scaled to ~10 steps of fast travel
-            reward    += 5.0
+        end_reason = "running"
+        if new_pos[0] >= self.GOAL_X:
+            # Robot reached the goal.  Bonus must be large enough to clearly
+            # distinguish "reached goal" from "timed out without collision".
+            # A 2000-step clean episode accumulates ~+2000–4000, so +5 (old value)
+            # was < 0.2% of that — no RL incentive to reach the goal at all.
+            # +500 makes success unambiguously the best outcome.
+            reward    += 500.0
             terminated = True
-        elif collided:
-            # Hit an obstacle — apply terminal penalty and end episode.
-            # COLLISION_PENALTY is already applied per-step inside _compute_reward,
-            # but we also terminate here so the agent cannot recover and linger.
+            end_reason = "goal"
+        elif collided_obstacle or collided_wall:
+            # Hit an obstacle or wall — apply the terminal collision penalty once
+            # and end the episode.  COLLISION_PENALTY is NOT applied per-step
+            # inside _compute_reward; this single application is the full signal.
+            reward    += self.COLLISION_PENALTY
+            # Reflect the actual terminal penalty in the components dict so that
+            # the breakdown is accurate when debugging.  Without this fix,
+            # components["collision"] always showed 0.0 even on crash steps.
+            components["collision"] = self.COLLISION_PENALTY
             terminated = True
+            end_reason = "collision"
         elif self._has_fallen():
             # Robot tipped over — end episode
             terminated = True
+            end_reason = "fall"
         elif self.step_count >= MAX_STEPS:
             # Ran out of time — truncate (not a failure, just a timeout)
             truncated = True
+            end_reason = "timeout"
 
         # 9. Update bookkeeping
         self.position    = list(new_pos)
         self._prev_x     = new_pos[0]
         self._prev_action = action.copy()
 
-        return obs, float(reward), terminated, truncated, {"reward_components": components}
+        # Normalise reward by running std (Welford online update).
+        self._rn_count += 1
+        delta          = reward - self._rn_mean
+        self._rn_mean += delta / self._rn_count
+        self._rn_var  += (delta * (reward - self._rn_mean) - self._rn_var) / self._rn_count
+        reward         = reward / (self._rn_var ** 0.5 + 1e-8)
+
+        return obs, float(reward), terminated, truncated, {
+            "reward_components": components,
+            "end_reason": end_reason,
+        }
 
     def render(self):
         pass  # GUI is opened in __init__ when render_mode == "human"
