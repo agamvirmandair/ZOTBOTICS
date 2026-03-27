@@ -249,11 +249,17 @@ class Agent:
             last_gae_lam = delta + self.gamma * self.gae_lambda * (1 - int(done_arr[t])) * last_gae_lam
             advantage[t] = last_gae_lam
 
-        # Normalize advantages (VERY important)
+        # Compute raw returns BEFORE normalizing advantages.
+        # returns[t] = advantage[t] + V(s_t) = Q estimate = critic training target.
+        # Normalizing advantage after this step does NOT affect returns.
+        returns = advantage + values   # shape (n_steps,)
+
+        # Normalize advantages (reduces gradient variance for the actor update).
         advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
         advantage = torch.tensor(advantage, dtype=torch.float32).to(self.actor.device)
-        values = torch.tensor(values, dtype=torch.float32).to(self.actor.device)
+        values    = torch.tensor(values,    dtype=torch.float32).to(self.actor.device)
+        returns   = torch.tensor(returns,   dtype=torch.float32).to(self.actor.device)
 
         # ---------------------
         # PPO Updates
@@ -285,8 +291,10 @@ class Agent:
                 actor_loss = -torch.min(weighted_probs, weighted_clipped_probs).mean()
 
                 # ---- Critic loss ----
-                returns = advantage[batch] + values[batch]
-                critic_loss = ((returns - critic_value) ** 2).mean()
+                # Use the pre-normalization returns computed above, NOT
+                # advantage[batch] + values[batch], which would give a corrupted
+                # target because advantage is already normalized at this point.
+                critic_loss = ((returns[batch] - critic_value) ** 2).mean()
 
                 total_loss = actor_loss + 0.5 * critic_loss
 
@@ -299,13 +307,8 @@ class Agent:
                 self.actor.optimizer.step()
                 self.critic.optimizer.step()
 
-            print(
-                f"Epoch {epoch} | "
-                f"Actor Loss: {actor_loss.item():.4f} | "
-                f"Critic Loss: {critic_loss.item():.4f}"
-            )
-
         self.memory.clear_memory()
+        return actor_loss.item(), critic_loss.item()
 
 def run_test_env():
     """

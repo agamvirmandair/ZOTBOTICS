@@ -15,7 +15,8 @@ from agent import Agent
 TOTAL_STEPS   = 1_000_000   # how many env steps to train for in total
 SAVE_INTERVAL = 10          # save model weights every N episodes
 LOG_FILE      = "reward_log.txt"
-train = True
+train = True # set to True to train, False to just run with saved weights (if they exist)
+
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 env   = SpiderEnv(render_mode="human")
@@ -29,41 +30,63 @@ if not train:
 # ── Training loop ─────────────────────────────────────────────────────────────
 episode        = 0
 episode_reward = 0.0
+episode_length = 0
 reward_history = []
+length_history = []
+collision_history = []
 
 for step in range(TOTAL_STEPS):
 
-    # Agent picks an action based on the current observation
     action, log_prob, value = agent.choose_action(obs)
-
-    # Environment executes the action and returns the new state
     obs, reward, terminated, truncated, info = env.step(action)
     episode_reward += reward
+    episode_length += 1
     done = terminated or truncated
 
-    # Store this transition in the agent's memory
     agent.remember(obs, action, log_prob, value, reward, done)
 
     if done:
-        episode += 1
+        episode    += 1
+        end_reason  = info.get("end_reason", "?")
+        per_step    = episode_reward / episode_length
+
         reward_history.append(episode_reward)
-        mean_reward = np.mean(reward_history[-100:])  # rolling average over last 100 eps
+        length_history.append(episode_length)
+        collision_history.append(1 if end_reason == "collision" else 0)
 
-        # Log to file
+        mean_reward    = np.mean(reward_history[-100:])
+        mean_length    = np.mean(length_history[-100:])
+        collision_rate = np.mean(collision_history[-100:]) * 100.0
+
+        actor_loss, critic_loss = agent.learn()
+
         with open(LOG_FILE, "a") as f:
-            f.write(f"Episode {episode}: reward={episode_reward:.2f}  mean={mean_reward:.2f}\n")
+            f.write(
+                f"ep={episode}"
+                f"  total={episode_reward:.2f}"
+                f"  per_step={per_step:.3f}"
+                f"  steps={episode_length}"
+                f"  end={end_reason}"
+                f"  mean100={mean_reward:.2f}"
+                f"  mean_len={mean_length:.0f}"
+                f"  coll%={collision_rate:.1f}"
+                f"  a_loss={actor_loss:.4f}"
+                f"  c_loss={critic_loss:.4f}"
+                f"\n"
+            )
 
-        # Learn from the episode
-        agent.learn()
-
-        # Print progress and save every SAVE_INTERVAL episodes
         if episode % SAVE_INTERVAL == 0:
-            print(f"Episode {episode:>5} | step {step:>7} | "
-                  f"reward {episode_reward:>8.2f} | mean(100) {mean_reward:>8.2f}")
+            print(
+                f"ep {episode:>5} | step {step:>7} | "
+                f"total {episode_reward:>8.2f} | steps {episode_length:>5} | "
+                f"end={end_reason:<9} | mean100 {mean_reward:>8.2f} | "
+                f"coll% {collision_rate:>5.1f} | "
+                f"a_loss {actor_loss:.4f} | c_loss {critic_loss:.4f}"
+            )
             agent.save_models()
 
-        # Start a new episode
         obs, _ = env.reset()
         episode_reward = 0.0
+        episode_length = 0
 
 env.close()
