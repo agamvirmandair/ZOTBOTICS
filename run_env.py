@@ -15,15 +15,14 @@ from agent import Agent
 TOTAL_STEPS   = 1_000_000   # how many env steps to train for in total
 SAVE_INTERVAL = 10          # save model weights every N episodes
 LOG_FILE      = "reward_log.txt"
-train = True # set to True to train, False to just run with saved weights (if they exist)
+train = False # set to True to train, False to just run with saved weights (if they exist)
 
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 env   = SpiderEnv(render_mode="human")
 obs, _= env.reset()
 
-agent = Agent(n_inputs=env.observation_space.shape[0],
-              n_actions=env.action_space.shape[0])
+agent = Agent(n_actions=env.action_space.shape[0], input_dims=env.observation_space.shape[0])
 if not train:
     agent.load_models()   # loads saved weights if they exist, otherwise starts fresh
 
@@ -37,13 +36,16 @@ collision_history = []
 
 for step in range(TOTAL_STEPS):
 
-    action, log_prob, value = agent.choose_action(obs)
+    action, raw_action, log_prob, value = agent.choose_action(obs)
+    current_obs = obs   # save obs_t before stepping — log_prob/value were computed here
     obs, reward, terminated, truncated, info = env.step(action)
     episode_reward += reward
     episode_length += 1
     done = terminated or truncated
 
-    agent.remember(obs, action, log_prob, value, reward, done)
+    # store current_obs (obs_t) so learn() evaluates new policy on the same
+    # observation that produced log_prob and value — fixes obs_t vs obs_t+1 mismatch
+    agent.remember(current_obs, raw_action, log_prob, value, reward, done)
 
     if done:
         episode    += 1
