@@ -45,7 +45,7 @@ CPG gait (mirrored trot):
   RL action is treated as a residual correction on top of CPG targets.
 
 Action  (12,) float32 — residual joint-angle offsets (rad), clipped to ±1.2
-Obs    (377,) float32 — 360 LiDAR distances (m)  +  12 joint positions (rad)  +  5 IMU (roll, pitch, yaw_rate, cos_yaw, sin_yaw)
+Obs    (375,) float32 — 360 LiDAR distances (m)  +  12 joint positions (rad)  +  3 IMU (roll, pitch, yaw_rate)
 
 Usage
 -----
@@ -164,7 +164,7 @@ FALL_ANGLE_RAD = 1.05    # ~60° in pitch or roll — robot considered fallen
 #   1. Obstacle avoidance  (proximity + forward-danger + collision + avoidance)
 #   2. Maximise +X         (forward displacement + progress shaping)
 FORWARD_WEIGHT       = 8.0    # X-displacement reward per metre
-SAFE_RADIUS          = 3.5    # m — warning zone for avoidance signal (raised from 3.0 to give more obstacle clearance margin)
+SAFE_RADIUS          = 2.0    # m — reduced from 3.5; 3.5 put all 3 obstacles in range simultaneously, causing conflicting repulsion vectors
 OBSTACLE_WEIGHT      = 5.0    # mild background proximity signal — approach+danger carry the main weight
 # Exponential steepness: penalty = (exp(EXP_K * closeness) - 1) / (exp(EXP_K) - 1)
 # EXP_K=3.5 → more linear early gradient so the robot gets a clear "start evading" signal
@@ -187,7 +187,7 @@ APPROACH_WEIGHT        = 12.0
 # forward_threat = max(closeness × forward_alignment) across all hazards in safe zone.
 # bonus = max(0, vx) × (1 − forward_threat) × weight
 # Full strength when the forward arc is empty; fades to 0 as an obstacle enters it.
-CLEAR_PATH_WEIGHT      = 4.0
+CLEAR_PATH_WEIGHT      = 12.0  # raised from 4.0 — must make forward speed clearly profitable vs penalty drain
 ALIGNMENT_WEIGHT       = 2.0   # reward for facing +X when forward path is clear
 
 # Direct per-step reward for actively spinning toward +X while misaligned.
@@ -195,20 +195,22 @@ ALIGNMENT_WEIGHT       = 2.0   # reward for facing +X when forward path is clear
 #   yaw > 0 (facing left)  → reward negative yaw_rate (turn clockwise = toward +X)
 #   yaw < 0 (facing right) → reward positive yaw_rate (turn counter-clockwise = toward +X)
 # Gated by (1-max_closeness) so it doesn't fight active obstacle evasion.
-YAW_REALIGN_WEIGHT     = 4.0
+YAW_REALIGN_WEIGHT     = 8.0   # raised from 4.0 — must make spinning back to +X clearly profitable
 # Penalise spinning *away* from +X (wrong spin direction) when path is clear.
 # Complement of yaw_realign_reward: positive when sin(yaw)*yaw_rate > 0, i.e.
 #   yaw > 0 (facing left)  and yaw_rate > 0 → spinning further left  (bad)
 #   yaw < 0 (facing right) and yaw_rate < 0 → spinning further right (bad)
 # This directly discourages the "always turn left" policy collapse.
-WRONG_SPIN_WEIGHT      = 6.0
+# Gate is now halved (0.5×) so wrong spin is still penalised even during obstacle
+# evasion — prevents the robot committing to a full 90° dodge spin.
+WRONG_SPIN_WEIGHT      = 12.0  # raised from 6.0
 
 # Re-alignment penalties.
 LATERAL_DRIFT_WEIGHT   = 4.0   # penalise |vy| — ungated so diagonal wall-drift is always costly
 # Always-active heading error penalty — NO clearance gate.
 # A gate would suppress this near walls, which is exactly when the robot must
 # correct its heading fastest to avoid crashing into them.
-YAW_CORRECTION_WEIGHT  = 5.0   # raised to make heading correction the dominant signal
+YAW_CORRECTION_WEIGHT  = 8.0   # raised from 4.0 — robot at 90° yaw must pay 8/step to make sustained misalignment expensive
 BACKWARD_WEIGHT        = 15.0  # penalise negative world-X velocity — must dominate obstacle avoidance savings from U-turns
 
 # Observation normalisation constants (not reward weights — kept for obs building).
@@ -216,7 +218,20 @@ YAW_RATE_CLIP      = 5.0   # rad/s ceiling for obs normalisation
 YAW_RATE_DEADBAND  = 0.40  # rad/s deadband (obs only)
 
 # Arena wall proximity zone.
-WALL_SAFE_RADIUS   = 3.0   # m — wall proximity warning zone (raised to give earlier braking signal)
+WALL_SAFE_RADIUS   = 2.5   # m — raised from 2.0; gives 2.5m warning before side walls instead of 1m, earlier correction signal
+
+# Front-arc LiDAR penalty — penalises short readings in the robot-relative forward sector.
+# This is the primary learnable replacement for yaw-based forward_danger:
+# the agent observes short front-LiDAR → gets penalised → learns not to face walls/obstacles.
+# FRONT_ARC_RAYS: number of rays on each side of heading (ray 0) → total arc = 2×FRONT_ARC_RAYS°
+# FRONT_ARC_SAFE: distance (m) beyond which the penalty is zero
+FRONT_ARC_RAYS   = 40     # ±40° arc = 80° total forward sector
+# Raised from 2.5 → 3.5: side walls sit at y=±2.95 m.  At 2.5 m the wall beyond
+# the centre-line was INVISIBLE to this penalty (1−2.95/2.5 < 0 → clamped to 0),
+# so a 90° spin in open space cost nothing observable.  At 3.5 m the same wall
+# gives closeness ≈ 0.16 and the agent can see and learn from it.
+FRONT_ARC_SAFE   = 3.5    # m — penalty starts when anything is closer than this ahead
+FRONT_ARC_WEIGHT = 10.0   # raised from 4.0 — front-arc LiDAR is the only heading signal the agent can observe; must dominate
 
 # Potential-based progress shaping toward the goal.
 # Grounded in Ng et al. (1999): Φ(s) = GOAL_X − x, so the per-step shaping reward
@@ -224,10 +239,19 @@ WALL_SAFE_RADIUS   = 3.0   # m — wall proximity warning zone (raised to give e
 # Equivalent to adding a second forward-weight that stops contributing once the
 # goal is reached, giving a strong dense signal for every centimetre of progress.
 GOAL_X           = 5.0     # m — target X coordinate (must match step() check)
-PROGRESS_WEIGHT  = 15.0    # shaping reward per metre closer to goal (raised: primary goal-direction signal)
+PROGRESS_WEIGHT  = 25.0    # raised from 15.0 — stronger pull toward goal to overcome per-step penalty drain
 # Small per-step cost so the agent cannot avoid the goal-penalty of wandering.
 # An efficient path (few steps, reaches goal) pays less total than a slow/wandering path.
 STEP_PENALTY     = 0.4     # subtracted every step regardless of what else happens
+
+# Minimum forward velocity penalty — fires when the front arc is clear but the
+# robot is barely moving forward.  Breaks the "drift sideways = safe" local optimum
+# by making low vx explicitly costly when there is nothing ahead to justify it.
+# penalty = max(0, MIN_VX_TARGET − vx) × (1 − max_forward_threat) × weight
+# Gated by (1 − max_forward_threat) so it stays silent when an obstacle is directly
+# ahead — the robot must evade first, resume speed after.
+MIN_VX_TARGET    = 0.10    # m/s — target minimum forward speed when path is clear
+MIN_VX_WEIGHT    = 6.0     # weight — enough to make idling clearly worse than walking
 
 # ── Residual action scale and smoothing ───────────────────────────────────────
 # RESIDUAL_SCALE multiplies the agent's raw action before it is added to the
@@ -236,16 +260,17 @@ STEP_PENALTY     = 0.4     # subtracted every step regardless of what else happe
 #   CPG shoulder amplitude : ±0.55 rad  (range = 1.10 rad)
 #   Max residual (raw)     : ±(1.2 × 0.15) = ±0.18 rad   ≈ 33% of CPG swing
 #
-# This ensures the CPG provides ≥67% of the control signal at all times, so
+# This ensures the CPG provides ≥35% of the control signal at all times, so
 # random RL exploration cannot flip joint directions or override the gait.
-RESIDUAL_SCALE = 0.15
+# Raised from 0.15 to 0.30 to give the agent more lateral steering authority.
+RESIDUAL_SCALE = 0.30
 
 # EMA weight applied to the residual each step before it reaches the joints.
 # Acts as a first-order IIR low-pass filter: only ACTION_SMOOTH_ALPHA of the
 # new action bleeds through per step; the rest carries over from the previous.
-#   α = 0.55  →  ~1.5-step time constant  →  ~50 ms lag at 33 ms/step
-# Increased from 0.3 so evasive lateral actions respond faster when near obstacles.
-ACTION_SMOOTH_ALPHA = 0.55
+#   α = 0.70  →  ~1-step time constant  →  ~33 ms lag at 33 ms/step
+# Raised from 0.55 to 0.70 so evasive lateral actions respond faster.
+ACTION_SMOOTH_ALPHA = 0.70
 
 # ── Wall planes for direct proximity computation ───────────────────────────────
 # Replaces getClosestPoints() for walls to fix two bugs:
@@ -317,9 +342,14 @@ class SpiderEnv(gym.Env):
     YAW_RATE_CLIP          = YAW_RATE_CLIP
     YAW_RATE_DEADBAND      = YAW_RATE_DEADBAND
     WALL_SAFE_RADIUS       = WALL_SAFE_RADIUS
+    FRONT_ARC_RAYS         = FRONT_ARC_RAYS
+    FRONT_ARC_SAFE         = FRONT_ARC_SAFE
+    FRONT_ARC_WEIGHT       = FRONT_ARC_WEIGHT
     GOAL_X                 = GOAL_X
     PROGRESS_WEIGHT        = PROGRESS_WEIGHT
     STEP_PENALTY           = STEP_PENALTY
+    MIN_VX_TARGET          = MIN_VX_TARGET
+    MIN_VX_WEIGHT          = MIN_VX_WEIGHT
     RESIDUAL_SCALE         = RESIDUAL_SCALE
     ACTION_SMOOTH_ALPHA    = ACTION_SMOOTH_ALPHA
 
@@ -328,27 +358,24 @@ class SpiderEnv(gym.Env):
         self.render_mode = render_mode
         self.urdf_path   = urdf_path
 
-        # Observation: 360 LiDAR + 12 joint angles + 5 IMU → 377-dim vector
+        # Observation: 360 LiDAR + 12 joint angles + 3 IMU → 375-dim vector
         #   [0:360]   LiDAR distances normalised to [0, 1] (divided by MAX_LIDAR)
         #   [360:372] joint positions (rad), range ≈ [-π, π]
         #   [372]     roll_n     — normalised to [-1, 1] via /π
         #   [373]     pitch_n    — normalised to [-1, 1] via /π
         #   [374]     yaw_rate_n — normalised to [-1, 1] via clip/YAW_RATE_CLIP
-        #   [375]     cos(yaw)   — heading component, in [-1, 1]
-        #   [376]     sin(yaw)   — heading component, in [-1, 1]
-        # cos(yaw)/sin(yaw) are CRITICAL: without them the policy cannot know which
-        # direction it is facing and cannot learn to correct its heading.  yaw_rate_n
-        # alone only tells the robot HOW FAST it is spinning, not WHERE it is pointing.
+        # cos(yaw)/sin(yaw) are NOT included — not available on the physical robot.
+        # The agent infers heading context from LiDAR (robot-relative) and yaw_rate_n.
         self.observation_space = spaces.Box(
             low=np.concatenate([
                 np.zeros(self.NUM_RAYS, dtype=np.float32),
                 np.full(12,  -np.pi, dtype=np.float32),
-                np.full(5,   -1.0,   dtype=np.float32),  # roll_n, pitch_n, yaw_rate_n, cos(yaw), sin(yaw)
+                np.full(3,   -1.0,   dtype=np.float32),  # roll_n, pitch_n, yaw_rate_n
             ]),
             high=np.concatenate([
                 np.full(self.NUM_RAYS, self.MAX_LIDAR, dtype=np.float32),
                 np.full(12,   np.pi, dtype=np.float32),
-                np.full(5,    1.0,   dtype=np.float32),  # roll_n, pitch_n, yaw_rate_n, cos(yaw), sin(yaw)
+                np.full(3,    1.0,   dtype=np.float32),  # roll_n, pitch_n, yaw_rate_n
             ]),
             dtype=np.float32,
         )
@@ -373,6 +400,7 @@ class SpiderEnv(gym.Env):
         self.step_count         = 0    # counts steps within the current episode
         self._prev_action       = np.zeros(12, dtype=np.float32)  # for smoothness penalty
         self._smoothed_residual = np.zeros(12, dtype=np.float32)  # EMA state for action filter
+        self._last_lidar        = np.full(self.NUM_RAYS, self.MAX_LIDAR, dtype=np.float32)  # cached for reward
         # Running reward normalisation — persists across episodes so the estimate
         # Reward normalisation removed — rewards are clipped to [-200, 50] in step().
 
@@ -482,41 +510,35 @@ class SpiderEnv(gym.Env):
             dtype=np.float32,
         )
 
-    def _get_imu(self) -> tuple[float, float, float, float, float]:
+    def _get_imu(self) -> tuple[float, float, float]:
         """
-        Return normalised IMU signals (roll_n, pitch_n, yaw_rate_n, cos_yaw, sin_yaw).
+        Return normalised IMU signals (roll_n, pitch_n, yaw_rate_n).
 
         Normalisation:
           roll_n      = roll    / π          — full-circle normalisation
           pitch_n     = pitch   / π          — full-circle normalisation
           yaw_rate_n  = clip(ω_z, ±YAW_RATE_CLIP) / YAW_RATE_CLIP
-          cos_yaw     = cos(yaw)             — naturally in [-1, 1]
-          sin_yaw     = sin(yaw)             — naturally in [-1, 1]
 
-        cos(yaw) and sin(yaw) are essential: they tell the policy WHERE it is pointing
-        so it can learn to correct its heading toward +X.  yaw_rate_n alone only tells
-        the robot HOW FAST it is spinning — without heading the yaw-correction reward
-        signal is unlearnable and the policy collapses to arbitrary spin.
+        cos(yaw)/sin(yaw) are NOT returned — unavailable on the physical robot.
         """
         _, orn = p.getBasePositionAndOrientation(self.robot_id)
-        roll, pitch, yaw = p.getEulerFromQuaternion(orn)
+        roll, pitch, _ = p.getEulerFromQuaternion(orn)
         _, ang_vel = p.getBaseVelocity(self.robot_id)
         yaw_rate = float(ang_vel[2])   # world-Z angular velocity ≈ yaw rate
 
         roll_n     = float(roll)   / math.pi
         pitch_n    = float(pitch)  / math.pi
         yaw_rate_n = float(np.clip(yaw_rate, -self.YAW_RATE_CLIP, self.YAW_RATE_CLIP)) / self.YAW_RATE_CLIP
-        cos_yaw    = float(math.cos(yaw))
-        sin_yaw    = float(math.sin(yaw))
-        return roll_n, pitch_n, yaw_rate_n, cos_yaw, sin_yaw
+        return roll_n, pitch_n, yaw_rate_n
 
     def _get_observation(self) -> np.ndarray:
-        # 360 LiDAR + 12 joint positions + 5 IMU → 377-dim obs vector
-        roll_n, pitch_n, yaw_rate_n, cos_yaw, sin_yaw = self._get_imu()
+        # 360 LiDAR + 12 joint positions + 3 IMU → 375-dim obs vector
+        self._last_lidar = self._get_lidar()   # cache for _compute_reward
+        roll_n, pitch_n, yaw_rate_n = self._get_imu()
         return np.concatenate([
-            self._get_lidar(),
+            self._last_lidar,
             self._get_joint_positions(),
-            np.array([roll_n, pitch_n, yaw_rate_n, cos_yaw, sin_yaw], dtype=np.float32),
+            np.array([roll_n, pitch_n, yaw_rate_n], dtype=np.float32),
         ])
 
     # ── Stability check ───────────────────────────────────────────────────────
@@ -621,12 +643,14 @@ class SpiderEnv(gym.Env):
         curr_dist_to_goal = max(0.0, self.GOAL_X - robot_pos[0])
         progress_reward   = (prev_dist_to_goal - curr_dist_to_goal) * self.PROGRESS_WEIGHT
 
-        # ── IMU (needed for heading vector and obs) ───────────────────────────
+        # ── IMU (heading vector for reward shaping — not in obs) ─────────────
+        # yaw is available in simulation for reward computation even though
+        # cos(yaw)/sin(yaw) are excluded from the observation.
         _, orn = p.getBasePositionAndOrientation(self.robot_id)
         _, _, yaw = p.getEulerFromQuaternion(orn)
         lin_vel, ang_vel = p.getBaseVelocity(self.robot_id)
-        yaw_rate = float(ang_vel[2])
-        vel_2d   = np.array([float(lin_vel[0]), float(lin_vel[1])], dtype=np.float64)
+        yaw_rate  = float(ang_vel[2])   # world-Z angular velocity ≈ yaw rate
+        vel_2d    = np.array([float(lin_vel[0]), float(lin_vel[1])], dtype=np.float64)
         robot_forward = np.array([math.cos(yaw), math.sin(yaw)])
 
         # ── Obstacle / wall proximity ─────────────────────────────────────────
@@ -642,6 +666,14 @@ class SpiderEnv(gym.Env):
         max_closeness        = 0.0
         max_forward_threat   = 0.0   # max(closeness × forward_alignment) — 0 = clear ahead
 
+        # Obstacle-only variants of the above — used to gate penalties that walls
+        # should NOT suppress.  Gates driven by wall threats create exploits:
+        #   • facing a side wall → wall forward_threat gates off min_vx_penalty
+        #   • near a side wall  → wall closeness gates off lateral_drift_penalty
+        # Separating these ensures only box-obstacle evasion unlocks those gates.
+        obs_max_closeness      = 0.0
+        obs_max_forward_threat = 0.0
+
         for obs_id in self.obstacle_ids:
             obs_pos, _ = p.getBasePositionAndOrientation(obs_id)
             vec_away = np.array(robot_pos[:2]) - np.array(obs_pos[:2])
@@ -655,20 +687,22 @@ class SpiderEnv(gym.Env):
                                        _PER_HAZARD_CAP)
                 repulsion_dir = vec_away / dist if dist > 1e-6 else np.array([1.0, 0.0])
                 away_speed    = float(np.clip(np.dot(vel_2d, repulsion_dir), 0.0, 1.0))
-                avoidance_total += closeness * away_speed * self.LATERAL_EVASION_WEIGHT
-                max_closeness    = max(max_closeness, closeness)
+                lateral_speed = abs(float(np.cross(repulsion_dir, vel_2d)))  # |vy| when obstacle is ahead
+                avoidance_total += closeness * (away_speed + lateral_speed) * self.LATERAL_EVASION_WEIGHT
+                max_closeness      = max(max_closeness, closeness)
+                obs_max_closeness  = max(obs_max_closeness, closeness)
                 # Heading-based: penalise facing toward the obstacle.
-                # closeness^0.5 front-loads the signal so the robot starts
-                # redirecting its heading from the outer edge of the safe zone.
+                # Linear in closeness — only generates meaningful turning force when
+                # the obstacle is genuinely close, not from 3m away.
                 forward_alignment = max(0.0, float(np.dot(robot_forward, -repulsion_dir)))
-                forward_danger_total += (closeness ** 0.5) * forward_alignment * self.FORWARD_DANGER_WEIGHT
-                max_forward_threat   = max(max_forward_threat, closeness * forward_alignment)
+                forward_danger_total += closeness * forward_alignment * self.FORWARD_DANGER_WEIGHT
+                max_forward_threat     = max(max_forward_threat, closeness * forward_alignment)
+                obs_max_forward_threat = max(obs_max_forward_threat, closeness * forward_alignment)
                 # Velocity-based: penalise actually moving toward the obstacle.
-                # Uses closeness^0.5 instead of closeness so the penalty is
-                # front-loaded — the robot feels meaningful pressure to turn
-                # from the outer edge of the safe zone, not just up close.
+                # Linear in closeness — distant obstacles don't generate strong
+                # turning forces that sweep the robot into other obstacle zones.
                 approach_speed = max(0.0, float(np.dot(vel_2d, -repulsion_dir)))
-                approach_total += (closeness ** 0.5) * approach_speed * self.APPROACH_WEIGHT
+                approach_total += closeness * approach_speed * self.APPROACH_WEIGHT
 
         robot_xy = np.array(robot_pos[:2], dtype=np.float64)
         for axis, face_pos, repulsion_dir in _WALL_PLANES:
@@ -691,10 +725,10 @@ class SpiderEnv(gym.Env):
                 away_speed    = float(np.clip(np.dot(vel_2d, repulsion_dir), 0.0, 1.0))
                 avoidance_total += closeness * away_speed * self.LATERAL_EVASION_WEIGHT
                 forward_alignment = max(0.0, float(np.dot(robot_forward, -repulsion_dir)))
-                forward_danger_total += (closeness ** 0.5) * forward_alignment * self.FORWARD_DANGER_WEIGHT
+                forward_danger_total += closeness * forward_alignment * self.FORWARD_DANGER_WEIGHT
                 max_forward_threat   = max(max_forward_threat, closeness * forward_alignment)
                 approach_speed = max(0.0, float(np.dot(vel_2d, -repulsion_dir)))
-                approach_total += (closeness ** 0.5) * approach_speed * self.APPROACH_WEIGHT
+                approach_total += closeness * approach_speed * self.APPROACH_WEIGHT
 
         proximity_penalty      = min(proximity_total,       20.0)
         avoidance_bonus        = min(avoidance_total,        12.0)
@@ -706,62 +740,86 @@ class SpiderEnv(gym.Env):
         # This means sprinting in world +X while pointing sideways earns no bonus,
         # creating a reward signal to re-align heading without needing yaw in obs.
         vx = float(lin_vel[0])
+        # Clear-path bonus: reward +X velocity when nothing is directly ahead AND
+        # the robot is facing forward.  heading_alignment = cos(yaw) is 1.0 when
+        # facing +X, 0 at 90°, so driving in world-X while pointing sideways earns
+        # nothing — creates a gradient toward maintaining yaw ≈ 0.
         heading_alignment = max(0.0, math.cos(yaw))
-        clear_path_bonus = max(0.0, vx) * (1.0 - max_forward_threat) * heading_alignment * self.CLEAR_PATH_WEIGHT
+        clear_path_bonus = max(0.0, vx) * heading_alignment * (1.0 - max_forward_threat) * self.CLEAR_PATH_WEIGHT
 
-        # Alignment reward — positive reward purely for facing +X when the forward
-        # path is clear.  Unlike clear_path_bonus this does NOT require vx > 0,
-        # so the robot gets a pull to rotate toward +X even before it starts moving.
-        # Gated by (1-max_closeness)^0.5 so it doesn't fight active evasion.
-        alignment_reward = heading_alignment * (1.0 - max_forward_threat) * ((1.0 - max_closeness) ** 0.5) * self.ALIGNMENT_WEIGHT
-
-        # Direct per-step reward for spinning toward +X.
-        # -sin(yaw)*yaw_rate is positive when the robot is actively rotating toward +X:
-        #   yaw > 0 (facing left)  and yaw_rate < 0 (turning clockwise)
-        #   yaw < 0 (facing right) and yaw_rate > 0 (turning counter-clockwise)
-        # NOT gated by closeness — realigning toward +X is always desirable; the evasion
-        # rewards already handle steering around obstacles via avoidance_bonus.
-        yaw_realign_reward = max(0.0, -math.sin(yaw) * yaw_rate) * self.YAW_REALIGN_WEIGHT
-
-        # Penalise spinning *away* from +X — the complement of yaw_realign_reward.
-        # sin(yaw)*yaw_rate > 0 means the robot is actively making its heading worse:
-        #   yaw > 0 (already left of +X) and yaw_rate > 0 → spinning further left
-        #   yaw < 0 (already right of +X) and yaw_rate < 0 → spinning further right
-        # NOT gated by closeness — near walls is exactly when wrong-direction spin is
-        # most harmful (the robot turns into the wall instead of away from it).
-        wrong_spin_penalty = max(0.0, math.sin(yaw) * yaw_rate) * self.WRONG_SPIN_WEIGHT
-
-        # Re-alignment penalties — gate both by clearance² so the penalty is near-zero
-        # whenever any obstacle is in the safe zone, and only reaches full strength in
-        # genuinely open space.  Squaring makes it fade 4× faster than a linear gate:
-        #   closeness=0.0 → clearance²=1.00  (full penalty — no hazards nearby)
-        #   closeness=0.3 → clearance²=0.49  (half strength — obstacle on outer edge)
-        #   closeness=0.5 → clearance²=0.25  (quarter strength — halfway into zone)
-        #   closeness=0.8 → clearance²=0.04  (nearly zero  — actively evading)
         vy = float(lin_vel[1])
-        # No clearance gate — penalty must stay strong near walls, not fade.
-        # The old gate (1-max_closeness)² shrank to near-zero as the robot
-        # approached the side wall, removing the signal exactly when it was needed.
-        lateral_drift_penalty  = abs(vy) * self.LATERAL_DRIFT_WEIGHT
-        # Penalise heading error from +X — always active, no clearance gate.
-        # A gate would weaken this near walls, exactly when correction is most urgent.
-        # cos(yaw)=1 when facing +X → error=0; cos(yaw)=-1 when facing -X → error=2.
+        # Gate lateral drift only by *obstacle* closeness — not wall closeness.
+        # Gating by wall closeness was an exploit: near side wall → lateral motion
+        # free → robot could slide into wall unchecked.  Box-obstacle evasion still
+        # legitimately silences the penalty (obs_max_closeness high when dodging).
+        lateral_drift_penalty  = abs(vy) * self.LATERAL_DRIFT_WEIGHT * (1.0 - obs_max_closeness)
+
+        # Penalise heading error using yaw (available in sim for reward shaping).
+        # Agent can't observe yaw directly, but this still guides CPG-based learning
+        # because the gait CPG tends to produce consistent heading; the penalty
+        # discourages drift without requiring the policy to explicitly represent yaw.
         yaw_error              = 1.0 - math.cos(yaw)
         yaw_correction_penalty = yaw_error * self.YAW_CORRECTION_WEIGHT
+
+        # Front-arc LiDAR penalty — the primary learnable replacement for yaw-based
+        # forward_danger.  Uses robot-relative LiDAR (ray 0 = straight ahead) so the
+        # agent can directly observe and respond to this signal without knowing yaw.
+        # Arc: rays [0 : FRONT_ARC_RAYS] and [NUM_RAYS-FRONT_ARC_RAYS : NUM_RAYS]
+        # (wrapping around ray 0 to cover ±FRONT_ARC_RAYS° of the forward sector).
+        # Each ray contributes a closeness in [0, 1]: 0 at FRONT_ARC_SAFE distance,
+        # 1 at contact.  The sum is normalised by arc size so the weight is stable
+        # regardless of FRONT_ARC_RAYS.
+        n_arc = self.FRONT_ARC_RAYS
+        front_rays = np.concatenate([
+            self._last_lidar[:n_arc],
+            self._last_lidar[-n_arc:],
+        ])
+        front_closeness = np.maximum(0.0, 1.0 - front_rays / self.FRONT_ARC_SAFE)
+        front_arc_penalty = float(np.mean(front_closeness)) * self.FRONT_ARC_WEIGHT
 
         # Penalise moving backward in world-X — always active, no clearance gate.
         # This makes the U-turn strategy (turn 180° to dodge, then reverse) clearly
         # worse than sidestepping, since every backward step has a direct cost.
         backward_penalty = max(0.0, -vx) * self.BACKWARD_WEIGHT
 
-        # Suppress all positive terms as the robot closes in on a hazard.
-        suppression     = 1.0 - max_closeness
+        # Minimum forward velocity penalty — breaks "drift sideways = safe" local optimum.
+        # Gated by (1 − max_forward_threat): silent when an obstacle is directly ahead
+        # so the robot is free to evade first and resume speed after.
+        # Gate min_vx only by *obstacle* forward threat — not wall forward threat.
+        # Previously gated by combined max_forward_threat, which let the robot face
+        # a side wall to suppress the penalty with zero risk of actually colliding
+        # (backward_penalty fires if it moves toward the wall in world-X).
+        min_vx_penalty = (max(0.0, self.MIN_VX_TARGET - vx)
+                          * (1.0 - obs_max_forward_threat)
+                          * self.MIN_VX_WEIGHT)
+
+        # Yaw realign reward — reward spinning *toward* +X when misaligned.
+        # sin(yaw) > 0 → facing left  → correct move is negative yaw_rate (clockwise)
+        # sin(yaw) < 0 → facing right → correct move is positive yaw_rate (counter-clockwise)
+        # In both cases, the correct rotation has the opposite sign to sin(yaw), so the
+        # product -sin(yaw)*yaw_rate is positive when the robot is actively correcting.
+        # Gated by (1 − obs_max_closeness) so it doesn't fight active obstacle evasion.
+        yaw_realign_reward = (max(0.0, -math.sin(yaw) * yaw_rate)
+                              * (1.0 - obs_max_closeness)
+                              * self.YAW_REALIGN_WEIGHT)
+
+        # Wrong spin penalty — penalise spinning *away* from +X.
+        # sin(yaw)*yaw_rate > 0 means the robot is rotating further from +X heading.
+        # Gate is halved: (1 − 0.5×obs_max_forward_threat) instead of full suppression.
+        # Full suppression let the robot spin 90° freely during obstacle evasion and
+        # then coast at the wrong heading once the obstacle cleared.  A 50% floor means
+        # even acute evasion still carries a wrong-spin cost, capping dodge angle.
+        wrong_spin_penalty = (max(0.0, math.sin(yaw) * yaw_rate)
+                              * (1.0 - 0.5 * obs_max_forward_threat)
+                              * self.WRONG_SPIN_WEIGHT)
+
+        # Suppress positive terms only when the robot is heading INTO a hazard.
+        # Using max_forward_threat (closeness × forward_alignment) instead of
+        # max_closeness means the robot still earns forward/progress reward while
+        # travelling alongside an obstacle — only head-on charges are penalised.
+        suppression     = 1.0 - max_forward_threat
         forward_reward  *= suppression
-        # Keep at least 30% of progress_reward even at max closeness.
-        # Fully suppressing it near obstacles teaches the agent that "going forward
-        # is only relevant when clear" — so after evasion it has no pull back toward
-        # the goal.  A 30% floor keeps the goal-direction signal alive at all times.
-        progress_reward *= max(0.3, suppression)
+        progress_reward *= suppression
 
         # Terminal penalties (applied here for logging; collision applied in step()).
         collision_penalty = 0.0
@@ -773,17 +831,18 @@ class SpiderEnv(gym.Env):
             forward_reward
             + progress_reward
             + clear_path_bonus
-            + alignment_reward
             + yaw_realign_reward
             - proximity_penalty
             - forward_danger_penalty
             - approach_penalty
+            - front_arc_penalty
             + avoidance_bonus
             + fall_penalty            # already negative
             - lateral_drift_penalty
             - yaw_correction_penalty
             - wrong_spin_penalty
             - backward_penalty
+            - min_vx_penalty
             - step_penalty
         )
 
@@ -791,16 +850,17 @@ class SpiderEnv(gym.Env):
             "forward":       round(forward_reward,            4),
             "progress":      round(progress_reward,           4),
             "clear_path":    round(clear_path_bonus,          4),
-            "alignment":     round(alignment_reward,          4),
             "yaw_realign":   round(yaw_realign_reward,        4),
             "proximity":     round(-proximity_penalty,        4),
             "fwd_danger":    round(-forward_danger_penalty,   4),
             "approach":      round(-approach_penalty,         4),
+            "front_arc":     round(-front_arc_penalty,        4),
             "avoidance":     round(avoidance_bonus,           4),
             "lat_drift":     round(-lateral_drift_penalty,    4),
             "yaw_correct":   round(-yaw_correction_penalty,   4),
             "wrong_spin":    round(-wrong_spin_penalty,       4),
             "backward":      round(-backward_penalty,         4),
+            "min_vx":        round(-min_vx_penalty,           4),
             "step":          round(-step_penalty,             4),
             "collision":     round(collision_penalty,         4),
             "fall":          round(fall_penalty,              4),
@@ -859,6 +919,7 @@ class SpiderEnv(gym.Env):
         pos, _ = p.getBasePositionAndOrientation(self.robot_id)
         self.position = list(pos)
         self._prev_x  = pos[0]
+        self._passed_obstacles = set()  # tracks which obstacles the robot has navigated past
 
         return self._get_observation(), {}
 
@@ -956,9 +1017,10 @@ class SpiderEnv(gym.Env):
             else:
                 # Obstacle collisions scale by how head-on the crash was.
                 # Glancing clips (approach≈0) cost 30%; head-on (approach≈15)
-                # cost 100%.  Gives PPO a gradient to learn from near-misses.
+                # cost 100%.  Floor raised from 10% to 30% so grazing an obstacle
+                # is never cheap enough to be a viable strategy.
                 approach_factor = min(abs(components["approach"]) / 15.0, 1.0)
-                scaled_penalty  = self.COLLISION_PENALTY * (0.1 + 0.9 * approach_factor)
+                scaled_penalty  = self.COLLISION_PENALTY * (0.3 + 0.7 * approach_factor)
             terminal_bonus          = scaled_penalty
             components["collision"] = scaled_penalty
             terminated              = True
@@ -977,11 +1039,22 @@ class SpiderEnv(gym.Env):
         self._prev_x     = new_pos[0]
         self._prev_action = action.copy()
 
+        # One-time bonus for navigating past each obstacle.
+        # Fires the first time the robot's X exceeds the obstacle's X by 0.5 m,
+        # giving an explicit "you went around it" signal without ending the episode.
+        passing_bonus = 0.0
+        for i, obs_id in enumerate(self.obstacle_ids):
+            if i not in self._passed_obstacles:
+                obs_pos, _ = p.getBasePositionAndOrientation(obs_id)
+                if new_pos[0] > obs_pos[0] + 0.5:
+                    self._passed_obstacles.add(i)
+                    passing_bonus += 30.0
+
         # Clip the continuous per-step reward, then add terminal bonuses.
         # Terminal bonuses must survive the clip: +500 goal and -10000 collision
         # are intentionally larger than any per-step reward and must remain
         # distinguishable from ordinary good/bad steps.
-        reward = float(np.clip(reward, -200.0, 50.0)) + terminal_bonus
+        reward = float(np.clip(reward, -200.0, 50.0)) + terminal_bonus + passing_bonus
 
         return obs, float(reward), terminated, truncated, {
             "reward_components": components,
